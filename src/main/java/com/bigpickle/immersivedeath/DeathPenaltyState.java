@@ -13,7 +13,8 @@ import net.minecraft.network.codec.StreamCodec;
  * <p>It is stored as a NeoForge data attachment so that it is saved to disk, copied across death
  * (see {@code copyOnDeath()}) and synchronised to the owning client for the HUD overlay.
  *
- * @param lostHp       total health permanently removed from the player's maximum health, in half-hearts (1.0 HP each)
+ * @param lostHp       total health permanently removed from the player's maximum health, measured in health points
+ *                     (2.0 HP = one heart)
  * @param penaltyStart wall-clock time the currently decaying penalty started, or {@code 0} if none is active
  * @param flags        bit field combining the "cleared by a cure" bits and the rapid/pending flags
  * @param lastDeath    wall-clock time of the player's most recent death, or {@code 0} if they never died

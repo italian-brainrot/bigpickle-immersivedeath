@@ -26,9 +26,20 @@ public class ReclaimedHeartItem extends Item {
     @Override
     public InteractionResultHolder<ItemStack> use(Level level, Player player, InteractionHand hand) {
         ItemStack stack = player.getItemInHand(hand);
+
+        // The penalty state is synced to the owning client, so both sides can agree on whether anything can be
+        // restored. This prevents the client from playing a use animation for a heart that the server rejects.
+        DeathPenaltyState state = player.getData(ModAttachments.DEATH_PENALTY.get());
+        if (state.lostHp() <= 0) {
+            if (!level.isClientSide) {
+                player.displayClientMessage(
+                        Component.translatable("immersivedeath.message.no_hearts").withStyle(ChatFormatting.GRAY), true);
+            }
+            return InteractionResultHolder.fail(stack);
+        }
+
         if (!level.isClientSide) {
-            DeathPenaltyState state = player.getData(ModAttachments.DEATH_PENALTY.get());
-            if (state.lostHp() <= 0 || !DeathHandler.restoreHeart(player, state)) {
+            if (!DeathHandler.restoreHeart(player, state)) {
                 player.displayClientMessage(
                         Component.translatable("immersivedeath.message.no_hearts").withStyle(ChatFormatting.GRAY), true);
                 return InteractionResultHolder.fail(stack);

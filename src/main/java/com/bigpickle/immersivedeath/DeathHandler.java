@@ -92,6 +92,14 @@ public final class DeathHandler {
         }
 
         List<ItemStack> kept = new ArrayList<>();
+        List<ItemStack> previous = player.getData(ModAttachments.KEPT_ITEMS.get());
+        if (!previous.isEmpty()) {
+            for (ItemStack stack : previous) {
+                if (!stack.isEmpty()) {
+                    kept.add(stack.copy());
+                }
+            }
+        }
         for (ItemEntity drop : event.getDrops()) {
             ItemStack stack = drop.getItem();
             if (!stack.isEmpty()) {
@@ -135,8 +143,13 @@ public final class DeathHandler {
         if (!(event.getEntity() instanceof ServerPlayer player)) {
             return;
         }
+        // If the player logs in while still dead (for example after a restart), the pending penalty and kept items
+        // must survive until respawn: the current entity is going to be discarded, so giving it the items or
+        // applying the penalty now would lose both. Clone/respawn handles it instead.
+        if (!player.isAlive()) {
+            return;
+        }
 
-        // Handles logging back in while dead (e.g. after a restart): the items and penalty are still pending.
         List<ItemStack> kept = player.getData(ModAttachments.KEPT_ITEMS.get());
         if (!kept.isEmpty()) {
             player.setData(ModAttachments.KEPT_ITEMS.get(), List.of());
@@ -233,8 +246,10 @@ public final class DeathHandler {
 
         setState(player, applied);
         updateEffects(player, applied, 0L);
-        player.displayClientMessage(
-                Component.translatable("immersivedeath.message.heart_lost").withStyle(ChatFormatting.RED), false);
+        if (lost > 0) {
+            player.displayClientMessage(
+                    Component.translatable("immersivedeath.message.heart_lost").withStyle(ChatFormatting.RED), false);
+        }
     }
 
     /**
@@ -316,7 +331,8 @@ public final class DeathHandler {
 
     private static int remainingTicks(EffectSpec spec, long elapsed) {
         long remainingMs = Math.max(50L, spec.durationMs() - elapsed);
-        return (int) Math.min(Integer.MAX_VALUE, remainingMs / 50L);
+        // Round up so the effect never expires a tick before the next refresh re-applies it.
+        return (int) Math.min(Integer.MAX_VALUE, (remainingMs + 49L) / 50L);
     }
 
     private static int clearedBitFor(Holder<MobEffect> effect) {

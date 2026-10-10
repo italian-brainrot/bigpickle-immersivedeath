@@ -32,11 +32,15 @@ public final class HudOverlay {
         }
 
         GuiGraphics graphics = event.getGuiGraphics();
-        int x = graphics.guiWidth() / 2 - 91;
-        int y = graphics.guiHeight() - 39 - 16;
+        String label = "-" + formatHearts(lostHp);
+        // Right-align the icon + label group against the left edge of the vanilla health bar (which starts at
+        // guiWidth/2 - 91) so it never overlaps the health, armor or food rows.
+        int groupWidth = 18 + minecraft.font.width(label);
+        int x = graphics.guiWidth() / 2 - 91 - groupWidth - 2;
+        int y = graphics.guiHeight() - 42;
 
         graphics.renderItem(icon(), x, y);
-        graphics.drawString(minecraft.font, "-" + formatHearts(lostHp), x + 18, y + 5, 0xFFFF5555, true);
+        graphics.drawString(minecraft.font, label, x + 18, y + 5, 0xFFFF5555, true);
     }
 
     private static ItemStack icon() {
@@ -46,7 +50,7 @@ public final class HudOverlay {
         return heartIcon;
     }
 
-    /** Lost health is measured in half-hearts; show a whole number, or {@code .5} for the rare odd value. */
+    /** Lost health is measured in health points (2.0 HP = one heart); show a whole number, or {@code .5} for odd amounts. */
     private static String formatHearts(int lostHp) {
         if (lostHp % 2 == 0) {
             return Integer.toString(lostHp / 2);
