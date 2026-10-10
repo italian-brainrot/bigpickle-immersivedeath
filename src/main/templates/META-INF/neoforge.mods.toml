@@ -36,17 +36,20 @@ displayName="${mod_name}" #mandatory
 #displayURL="https://change.me.to.your.mods.homepage.example.invalid/" #optional
 
 # A file name (in the root of the mod JAR) containing a logo for display
-#logoFile="examplemod.png" #optional
+#logoFile="immersivedeath.png" #optional
 
 # A text field displayed in the mod UI
 #credits="" #optional
 
 # The authors of the mod, displayed in the mod UI (optional)
-#authors=""
+authors="BigPickle"
 
 # The description text for the mod (multi line!) (#mandatory)
 description='''
-Example mod description.
+An immersive alternative to keepInventory=true. When keepInventory is disabled,
+dying no longer scatters your items across the world: instead you keep your
+inventory, but respawn with decaying debuffs, reduced hunger, no experience and
+permanently reduced max health that can be restored with the Reclaimed Heart.
 '''
 
 # The [[mixins]] block allows you to declare your mixin config to FML so that it gets loaded.

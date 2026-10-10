@@ -1,0 +1,8 @@
+{
+  "itemGroup.immersivedeath": "Immersive Death",
+  "item.immersivedeath.reclaimed_heart": "Reclaimed Heart",
+  "item.immersivedeath.reclaimed_heart.tooltip": "Restores one heart of maximum health lost to death",
+  "immersivedeath.message.heart_lost": "Death has claimed a heart of your maximum health",
+  "immersivedeath.message.heart_restored": "Restored a lost heart of maximum health",
+  "immersivedeath.message.no_hearts": "You have no lost maximum health to restore"
+}
