@@ -15,9 +15,9 @@ import net.minecraft.network.codec.StreamCodec;
  *
  * @param lostHp       total health permanently removed from the player's maximum health, measured in health points
  *                     (2.0 HP = one heart)
- * @param penaltyStart wall-clock time the currently decaying penalty started, or {@code 0} if none is active
+ * @param penaltyStart world game tick the currently decaying penalty started, or {@code 0} if none is active
  * @param flags        bit field combining the "cleared by a cure" bits and the rapid/pending flags
- * @param lastDeath    wall-clock time of the player's most recent death, or {@code 0} if they never died
+ * @param lastDeath    world game tick of the player's most recent death, or {@code 0} if they never died
  */
 public record DeathPenaltyState(int lostHp, long penaltyStart, int flags, long lastDeath) {
     /** Set when the nausea penalty has been removed by a cure such as milk. */

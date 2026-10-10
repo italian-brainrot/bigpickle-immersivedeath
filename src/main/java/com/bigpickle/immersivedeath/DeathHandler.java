@@ -13,6 +13,7 @@ import net.minecraft.world.effect.MobEffects;
 import net.minecraft.world.entity.ai.attributes.AttributeInstance;
 import net.minecraft.world.entity.ai.attributes.Attributes;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.entity.player.Player;
 import net.minecraft.world.food.FoodData;
 import net.minecraft.world.item.ItemStack;
@@ -32,14 +33,21 @@ import net.neoforged.neoforge.event.tick.PlayerTickEvent;
  * <ul>
  *     <li>We never touch any event other mods use to react to death, so their death triggers keep working.</li>
  *     <li>We only cancel {@link LivingDropsEvent} when nobody else already handled it, so grave-stone style mods
- *     take priority and we never cause item duplication.</li>
+ *     take priority and we never cause item duplication. If another mod cancels the drops we explicitly discard our
+ *     inventory snapshot so we cannot duplicate what the other mod kept.</li>
+ *     <li>Instead of collecting the dropped items, the vanilla inventory (main + armor + off-hand) is snapshotted
+ *     slot by slot at the moment of death and written back into the exact same slots at respawn. Equipped armor and
+ *     the off-hand item are preserved and nothing can be lost to a full main inventory. Only drops that other mods
+ *     added to the event are captured separately.</li>
  *     <li>Maximum health is changed through the attribute base value, which is non-invasive and stacks with
  *     attribute modifiers added by other mods.</li>
+ *     <li>All timings use world game ticks, so the penalty decay pauses with the game (e.g. in single-player) and
+ *     is unaffected by system clock changes.</li>
  * </ul>
  */
 public final class DeathHandler {
-    /** A second death within this window only costs experience, to avoid punishing death loops. */
-    public static final long RAPID_WINDOW_MS = 60_000L;
+    /** A second death within this window only costs experience, to avoid punishing death loops. In game ticks. */
+    public static final long RAPID_WINDOW_TICKS = 60L * 20L;
 
     /** Health removed per death: 2 HP (one heart). */
     private static final int LOST_HP_PER_DEATH = 2;
@@ -47,9 +55,9 @@ public final class DeathHandler {
     private static final double MIN_MAX_HEALTH = 1.0D;
 
     private static final List<EffectSpec> EFFECTS = List.of(
-            new EffectSpec(MobEffects.CONFUSION, DeathPenaltyState.CLEARED_NAUSEA, 9, 30_000L),
-            new EffectSpec(MobEffects.BLINDNESS, DeathPenaltyState.CLEARED_BLINDNESS, 15, 60_000L),
-            new EffectSpec(MobEffects.WEAKNESS, DeathPenaltyState.CLEARED_WEAKNESS, 18, 600_000L));
+            new EffectSpec(MobEffects.CONFUSION, DeathPenaltyState.CLEARED_NAUSEA, 9, 30L * 20L),
+            new EffectSpec(MobEffects.BLINDNESS, DeathPenaltyState.CLEARED_BLINDNESS, 15, 60L * 20L),
+            new EffectSpec(MobEffects.WEAKNESS, DeathPenaltyState.CLEARED_WEAKNESS, 18, 600L * 20L));
 
     /** Guards {@link #onEffectRemoved} so our own effect refreshes are not mistaken for an external cure. */
     private static boolean suppressingRemoval = false;
@@ -67,46 +75,83 @@ public final class DeathHandler {
             return;
         }
 
-        long now = System.currentTimeMillis();
+        long now = now(player);
         DeathPenaltyState state = player.getData(ModAttachments.DEATH_PENALTY.get());
-        boolean rapid = state.lastDeath() > 0L && (now - state.lastDeath()) < RAPID_WINDOW_MS;
+        boolean rapid = state.lastDeath() > 0L && (now - state.lastDeath()) < RAPID_WINDOW_TICKS;
 
         int flags = state.flags() | DeathPenaltyState.PENDING;
         flags = rapid ? (flags | DeathPenaltyState.RAPID) : (flags & ~DeathPenaltyState.RAPID);
 
         setState(player, state.withLastDeath(now).withFlags(flags));
+        // The inventory is still intact here: dropAllDeathLoot() runs after the death event.
+        snapshotInventory(player);
     }
 
     /**
      * Runs at the lowest priority so that any other mod (graves, souls, etc.) that cancels the event keeps ownership
-     * of the drops. When we are the ones handling it we capture the items and cancel the event so nothing is
-     * scattered on the ground.
+     * of the drops. When we are the ones handling it we cancel the event so nothing is scattered on the ground; the
+     * inventory snapshot and the separately captured extra drops keep everything for respawn.
      */
     @SubscribeEvent(priority = EventPriority.LOWEST)
     public static void onLivingDrops(LivingDropsEvent event) {
         if (event.isCanceled()) {
+            // Someone else took ownership of the drops (a grave, a soul, ...). Discard our snapshot so the items are
+            // not restored a second time at respawn.
+            if (event.getEntity() instanceof ServerPlayer player) {
+                player.setData(ModAttachments.INVENTORY_SNAPSHOT.get(), List.of());
+            }
             return;
         }
         if (!(event.getEntity() instanceof ServerPlayer player) || !penaltiesEnabled(player)) {
             return;
         }
 
-        List<ItemStack> kept = new ArrayList<>();
-        List<ItemStack> previous = player.getData(ModAttachments.KEPT_ITEMS.get());
-        if (!previous.isEmpty()) {
-            for (ItemStack stack : previous) {
+        List<ItemStack> snapshot = player.getData(ModAttachments.INVENTORY_SNAPSHOT.get());
+        if (snapshot.isEmpty()) {
+            // Safety net: no snapshot was recorded (should not happen). Keep every drop so the player never loses
+            // items; they are simply handed back into the inventory or dropped at the respawn point.
+            List<ItemStack> captured = new ArrayList<>();
+            for (ItemEntity drop : event.getDrops()) {
+                ItemStack stack = drop.getItem();
                 if (!stack.isEmpty()) {
-                    kept.add(stack.copy());
+                    captured.add(stack.copy());
                 }
             }
+            if (!captured.isEmpty()) {
+                player.setData(ModAttachments.KEPT_ITEMS.get(), mergeKept(
+                        player.getData(ModAttachments.KEPT_ITEMS.get()), captured));
+            }
+            event.setCanceled(true);
+            return;
         }
+
+        // Vanilla spawns exactly one drop per non-empty inventory slot, holding the same ItemStack instance that was
+        // in the slot. Match the drops back against the snapshot so we know what belongs to the inventory (restored
+        // into its original slots) and what other mods added (handed back into the inventory or dropped at respawn).
+        boolean[] consumed = new boolean[snapshot.size()];
+        List<ItemStack> extras = new ArrayList<>();
         for (ItemEntity drop : event.getDrops()) {
             ItemStack stack = drop.getItem();
-            if (!stack.isEmpty()) {
-                kept.add(stack.copy());
+            if (stack.isEmpty()) {
+                continue;
+            }
+            boolean wasPartOfInventory = false;
+            for (int i = 0; i < snapshot.size(); i++) {
+                if (!consumed[i] && !snapshot.get(i).isEmpty() && ItemStack.matches(snapshot.get(i), stack)) {
+                    consumed[i] = true;
+                    wasPartOfInventory = true;
+                    break;
+                }
+            }
+            if (!wasPartOfInventory) {
+                extras.add(stack.copy());
             }
         }
-        player.setData(ModAttachments.KEPT_ITEMS.get(), List.copyOf(kept));
+
+        if (!extras.isEmpty() || !player.getData(ModAttachments.KEPT_ITEMS.get()).isEmpty()) {
+            player.setData(ModAttachments.KEPT_ITEMS.get(),
+                    mergeKept(player.getData(ModAttachments.KEPT_ITEMS.get()), extras));
+        }
         event.setCanceled(true);
     }
 
@@ -121,19 +166,21 @@ public final class DeathHandler {
         Player original = event.getOriginal();
         Player clone = event.getEntity();
 
-        List<ItemStack> kept = original.getData(ModAttachments.KEPT_ITEMS.get());
-        if (!kept.isEmpty()) {
-            original.setData(ModAttachments.KEPT_ITEMS.get(), List.of());
-            giveItems(clone, kept);
-        }
+        // The item data and the penalty state follow the player regardless of listener ordering. Items are handed out
+        // in {@link #onPlayerRespawn} (and the login fallback), at which point the new player is at their respawn
+        // position and can receive them in their original slots.
+        clone.setData(ModAttachments.INVENTORY_SNAPSHOT.get(), List.copyOf(original.getData(ModAttachments.INVENTORY_SNAPSHOT.get())));
+        clone.setData(ModAttachments.KEPT_ITEMS.get(), List.copyOf(original.getData(ModAttachments.KEPT_ITEMS.get())));
+        original.setData(ModAttachments.INVENTORY_SNAPSHOT.get(), List.of());
+        original.setData(ModAttachments.KEPT_ITEMS.get(), List.of());
 
-        // Make sure the penalty state follows the player regardless of listener ordering.
         clone.setData(ModAttachments.DEATH_PENALTY.get(), original.getData(ModAttachments.DEATH_PENALTY.get()));
     }
 
     @SubscribeEvent
     public static void onPlayerRespawn(PlayerEvent.PlayerRespawnEvent event) {
         if (event.getEntity() instanceof ServerPlayer player) {
+            restoreItems(player);
             applyPendingPenalty(player);
         }
     }
@@ -143,18 +190,14 @@ public final class DeathHandler {
         if (!(event.getEntity() instanceof ServerPlayer player)) {
             return;
         }
-        // If the player logs in while still dead (for example after a restart), the pending penalty and kept items
-        // must survive until respawn: the current entity is going to be discarded, so giving it the items or
-        // applying the penalty now would lose both. Clone/respawn handles it instead.
+        // If the player logs in while still dead (for example after a restart), the pending penalty, inventory
+        // snapshot and kept items must survive until respawn: the current entity is going to be discarded, so
+        // restoring anything now would lose it. Clone/respawn handles it instead.
         if (!player.isAlive()) {
             return;
         }
 
-        List<ItemStack> kept = player.getData(ModAttachments.KEPT_ITEMS.get());
-        if (!kept.isEmpty()) {
-            player.setData(ModAttachments.KEPT_ITEMS.get(), List.of());
-            giveItems(player, kept);
-        }
+        restoreItems(player);
         applyPendingPenalty(player);
     }
 
@@ -170,7 +213,7 @@ public final class DeathHandler {
             return;
         }
 
-        long elapsed = Math.max(0L, System.currentTimeMillis() - state.penaltyStart());
+        long elapsed = Math.max(0L, now(player) - state.penaltyStart());
         if (!updateEffects(player, state, elapsed)) {
             setState(player, state.withPenaltyStart(0L).withoutCleared());
         }
@@ -241,7 +284,7 @@ public final class DeathHandler {
                 .withoutCleared()
                 .flags();
         DeathPenaltyState applied = state.withLostHp(state.lostHp() + lost)
-                .withPenaltyStart(System.currentTimeMillis())
+                .withPenaltyStart(now(player))
                 .withFlags(flags);
 
         setState(player, applied);
@@ -279,13 +322,49 @@ public final class DeathHandler {
         return true;
     }
 
+    // Item restoration -----------------------------------------------------------------------------------------------------
+
+    /**
+     * Records the player's vanilla inventory (main + armor + off-hand, in slot order) before the death drops clear it.
+     */
+    private static void snapshotInventory(ServerPlayer player) {
+        Inventory inventory = player.getInventory();
+        List<ItemStack> snapshot = new ArrayList<>(inventory.getContainerSize());
+        for (int i = 0; i < inventory.getContainerSize(); i++) {
+            snapshot.add(inventory.getItem(i));
+        }
+        player.setData(ModAttachments.INVENTORY_SNAPSHOT.get(), snapshot);
+    }
+
+    /**
+     * Restores the inventory snapshot into its original slots and hands back the extra drops that other mods added
+     * to the death drops. Safe to call more than once: both attachments are cleared as soon as they are consumed.
+     */
+    private static void restoreItems(ServerPlayer player) {
+        List<ItemStack> snapshot = player.getData(ModAttachments.INVENTORY_SNAPSHOT.get());
+        if (!snapshot.isEmpty()) {
+            Inventory inventory = player.getInventory();
+            int slots = Math.min(snapshot.size(), inventory.getContainerSize());
+            for (int i = 0; i < slots; i++) {
+                inventory.setItem(i, snapshot.get(i));
+            }
+            player.setData(ModAttachments.INVENTORY_SNAPSHOT.get(), List.of());
+        }
+
+        List<ItemStack> extras = player.getData(ModAttachments.KEPT_ITEMS.get());
+        if (!extras.isEmpty()) {
+            player.setData(ModAttachments.KEPT_ITEMS.get(), List.of());
+            giveItems(player, extras);
+        }
+    }
+
     // Helpers --------------------------------------------------------------------------------------------------------------
 
     private static void refreshEffects(ServerPlayer player, DeathPenaltyState state) {
         if (state.penaltyStart() <= 0L) {
             return;
         }
-        long elapsed = Math.max(0L, System.currentTimeMillis() - state.penaltyStart());
+        long elapsed = Math.max(0L, now(player) - state.penaltyStart());
         if (!updateEffects(player, state, elapsed)) {
             setState(player, state.withPenaltyStart(0L).withoutCleared());
         }
@@ -311,28 +390,27 @@ public final class DeathHandler {
             MobEffectInstance current = player.getEffect(spec.effect());
             if (current == null || current.getAmplifier() != level - 1) {
                 removeIfPresent(player, spec.effect());
-                player.addEffect(new MobEffectInstance(spec.effect(), remainingTicks(spec, elapsed), level - 1, false, true, true));
+                player.addEffect(new MobEffectInstance(spec.effect(), (int) remainingTicks(spec, elapsed), level - 1, false, true, true));
             }
         }
         return anyActive;
     }
 
-    /** Linearly decays {@code maxLevel -> 0} over {@code durationMs}. */
+    /** Linearly decays {@code maxLevel -> 0} over {@code durationTicks}. */
     private static int levelFor(EffectSpec spec, long elapsed) {
-        if (elapsed >= spec.durationMs()) {
+        if (elapsed >= spec.durationTicks()) {
             return 0;
         }
         if (elapsed <= 0L) {
             return spec.maxLevel();
         }
-        double fraction = 1.0D - (double) elapsed / (double) spec.durationMs();
+        double fraction = 1.0D - (double) elapsed / (double) spec.durationTicks();
         return Math.max(0, Math.min(spec.maxLevel(), (int) Math.ceil(spec.maxLevel() * fraction)));
     }
 
-    private static int remainingTicks(EffectSpec spec, long elapsed) {
-        long remainingMs = Math.max(50L, spec.durationMs() - elapsed);
-        // Round up so the effect never expires a tick before the next refresh re-applies it.
-        return (int) Math.min(Integer.MAX_VALUE, (remainingMs + 49L) / 50L);
+    private static long remainingTicks(EffectSpec spec, long elapsed) {
+        // At least one tick so the effect never expires a tick before the next refresh re-applies it.
+        return Math.max(1L, spec.durationTicks() - elapsed);
     }
 
     private static int clearedBitFor(Holder<MobEffect> effect) {
@@ -370,10 +448,34 @@ public final class DeathHandler {
                 && !player.serverLevel().getGameRules().getBoolean(GameRules.RULE_KEEPINVENTORY);
     }
 
+    /** The current world game time in ticks, used for every timing decision so the decay pauses with the game. */
+    private static long now(ServerPlayer player) {
+        return player.serverLevel().getGameTime();
+    }
+
     private static void setState(ServerPlayer player, DeathPenaltyState state) {
         player.setData(ModAttachments.DEATH_PENALTY.get(), state);
         player.syncData(ModAttachments.DEATH_PENALTY.get());
     }
 
-    private record EffectSpec(Holder<MobEffect> effect, int clearedBit, int maxLevel, long durationMs) {}
+    /**
+     * Copies the non-empty stacks of {@code previous} and {@code additions} into a single list. The kept list is
+     * slot agnostic (it is handed back with {@link #giveItems}), so empties can be dropped safely.
+     */
+    private static List<ItemStack> mergeKept(List<ItemStack> previous, List<ItemStack> additions) {
+        List<ItemStack> merged = new ArrayList<>(previous.size() + additions.size());
+        for (ItemStack stack : previous) {
+            if (!stack.isEmpty()) {
+                merged.add(stack.copy());
+            }
+        }
+        for (ItemStack stack : additions) {
+            if (!stack.isEmpty()) {
+                merged.add(stack.copy());
+            }
+        }
+        return List.copyOf(merged);
+    }
+
+    private record EffectSpec(Holder<MobEffect> effect, int clearedBit, int maxLevel, long durationTicks) {}
 }

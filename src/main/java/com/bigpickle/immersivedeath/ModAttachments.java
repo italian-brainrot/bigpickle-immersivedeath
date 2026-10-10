@@ -24,13 +24,27 @@ public final class ModAttachments {
                     .build());
 
     /**
-     * Items that were dropped when the player died but which we keep for them. Persisted so that a server
-     * restart in between death and respawn does not lose them; it is intentionally not copied automatically
-     * because the handler moves the contents into the new player's inventory itself.
+     * Extra drops captured on death that are not part of the vanilla player inventory (for example drops added by
+     * other mods). The vanilla inventory itself is restored from {@link #INVENTORY_SNAPSHOT}; this list only holds
+     * the overflow. It is persisted so that a server restart in between death and respawn does not lose anything,
+     * and it is intentionally not copied on death because the death handler moves the values to the new player
+     * entity itself.
      */
     public static final DeferredHolder<AttachmentType<?>, AttachmentType<List<ItemStack>>> KEPT_ITEMS =
             ATTACHMENTS.register("kept_items", () -> AttachmentType.<List<ItemStack>>builder(() -> List.of())
-                    .serialize(ItemStack.CODEC.listOf())
+                    .serialize(ItemStack.OPTIONAL_CODEC.listOf())
+                    .build());
+
+    /**
+     * Slot-by-slot snapshot of the player's vanilla inventory (main + armor + off-hand) taken at the moment of a
+     * death this mod handles. On respawn it is written back into the exact same slots, so equipped armor and the
+     * off-hand item are preserved and nothing can be lost to a full main inventory. Persisted so a server restart
+     * in between death and respawn does not lose it; not copy-on-death because the handler relays it to the new
+     * player itself.
+     */
+    public static final DeferredHolder<AttachmentType<?>, AttachmentType<List<ItemStack>>> INVENTORY_SNAPSHOT =
+            ATTACHMENTS.register("inventory_snapshot", () -> AttachmentType.<List<ItemStack>>builder(() -> List.of())
+                    .serialize(ItemStack.OPTIONAL_CODEC.listOf())
                     .build());
 
     private ModAttachments() {}
